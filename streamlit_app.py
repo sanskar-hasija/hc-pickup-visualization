@@ -1,151 +1,385 @@
 import streamlit as st
+import plotly.graph_objects as go
 import pandas as pd
-import math
-from pathlib import Path
+import os 
+import glob
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+def process_pickup(pickup):
+    pickup['report_date']=pd.to_datetime(pickup['report_date'])
+    pickup['stay_date']=pd.to_datetime(pickup['stay_date'])
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+    rooms_df = pickup[['report_date','stay_date','dynamic_rooms','total_rooms','dynamic_room_revenue','total_room_revenue']]
+    return rooms_df
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+bookings = pd.read_parquet('data/processed_bookings.parquet')
+pickup = pd.read_csv('data/pickup.csv')
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+pickup = process_pickup(pickup)
+bookings = bookings.merge(pickup, on=['stay_date', 'report_date'], how='left')
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+assert (bookings['cumulative_total_bookings'] == bookings['cumulative_total_type_bookings']).sum() == len(bookings)
+bookings['booking_diff'] = bookings['cumulative_total_bookings'] - bookings['total_rooms'] 
+print( "Percentage of correct mapping in bookings and pickup", ((bookings['cumulative_total_bookings'] == bookings['total_rooms']).sum()/ len(bookings)) * 100)
+plot_data = bookings.copy()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+min_report_date = plot_data.report_date.min()
+max_report_date = plot_data.report_date.max()
+new_max_report_date = max_report_date + pd.DateOffset(months=4)
+zmin = plot_data.cumulative_total_bookings.min()
+zmax = plot_data.cumulative_total_bookings.max()
 
-    return gdp_df
+custom_colorscale = [
+    [0, 'white'],         
+    [0.2, 'lightblue'],   
+    [0.4, 'blue'],        
+    [0.6, 'lightgreen'],  
+    [0.8, 'yellow'],      
+    [1, 'red']            
+]
+diff_min_val = plot_data['booking_diff'].min()
+diff_max_val = plot_data['booking_diff'].max()
+diff_mid_val = 0  
+zero_position = abs(diff_min_val) / (diff_max_val - diff_min_val)
 
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
+custom_colorscale_diff = [
+    [0, 'blue'],     
+    [zero_position / 2, 'lightblue'],        
+    [zero_position, 'white'],  
+    [zero_position + (1 - zero_position) / 2, '#FFCCCB'],      
+    [1, 'red']            
 ]
 
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+trace_individual = go.Heatmap(
+    z=plot_data.cumulative_individual_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Individual Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_dynamic_group = go.Heatmap(
+    z=plot_data.cumulative_dynamic_group_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Dynamic Group Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_static_group = go.Heatmap(
+    z=plot_data.cumulative_static_individual_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Static Individual Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_total = go.Heatmap(
+    z=plot_data.cumulative_total_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Total Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+)
+trace_pickup = go.Heatmap(
+    z=plot_data.total_rooms,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Pickup Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_diff = go.Heatmap(
+    z=plot_data.booking_diff,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale_diff,
+    colorbar=dict(title='Booking Difference'),
+    visible= False
 )
 
-''
-''
+fig = go.Figure(data=[trace_individual, trace_dynamic_group, trace_static_group, trace_total, trace_pickup, trace_diff])
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
 
-st.header(f'GDP in {to_year}', divider='gray')
+buttons = [
+    dict(
+        label="Individual",
+        method="update",
+        args=[{"visible": [True, False, False, False, False, False]}],
+    ),
+    dict(
+        label="Dynamic Group",
+        method="update",
+        args=[{"visible": [False, True, False, False, False, False]}],
+    ),
+    dict(
+        label="Static Individual",
+        method="update",
+        args=[{"visible": [False, False, True, False, False, False]}],
+    ),
+    dict(
+        label="Total",
+        method="update",
+        args=[{"visible": [False, False, False, True, False, False]}],
+    ),
+    dict(
+        label="Pickup",
+        method="update",
+        args=[{"visible": [False, False, False, False, True, False]}],
+    ),
+    dict(
+        label="Booking Difference",
+        method="update",
+        args=[{"visible": [False, False, False, False, False, True]}],
+    )
+]
 
-''
 
-cols = st.columns(4)
+fig.update_layout(
+    title=f'Bookings Analysis Segment - 1 , Report Date Range: {min_report_date.date()} - {max_report_date.date()}',
+    title_x=0.45,
+    updatemenus=[{
+        'type': 'dropdown',
+        'x': 1.1,
+        'y': 1.15,
+        'showactive': True,
+        'active': 0,
+        'buttons': buttons[:3]
+    },
+    {
+        'type': 'buttons',
+        'direction': 'right',
+        'x': 0.65,
+        'y': 1.15,
+        'showactive': True,
+        'active': 0,
+        'buttons': buttons[3:]
+    }
+    ]
+)
+fig.update_xaxes(title_text="Stay Date")
+fig.update_yaxes(title_text="Report Date")
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+# Show figure
+st.plotly_chart(fig)
 
-    with col:
-        first_gdp = first_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
+trace_direct = go.Heatmap(
+    z=plot_data.cumulative_direct_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Direct Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+trace_indirect = go.Heatmap(
+    z=plot_data.cumulative_indirect_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Indirect Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+trace_ota = go.Heatmap(
+    z=plot_data.cumulative_ota_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='OTA Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_other_type = go.Heatmap(
+    z=plot_data.cumulative_other_type_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Other Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_total = go.Heatmap(
+    z=plot_data.cumulative_total_type_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    zmin=zmin,
+    zmax=zmax,
+    colorbar=dict(title='Total Bookings'),
+)
+trace_pickup = go.Heatmap(
+    z=plot_data.total_rooms,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Pickup Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_diff = go.Heatmap(
+    z=plot_data.booking_diff,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale_diff,
+    colorbar=dict(title='Booking Difference'),
+    visible= False
+)
+
+
+fig = go.Figure(data=[trace_direct, trace_indirect, trace_ota, trace_other_type, trace_total, trace_pickup, trace_diff])
+
+
+
+buttons = [
+    
+    dict(
+        label="Direct",
+        method="update",
+        args=[{"visible": [True, False, False, False, False, False, False]}],
+    ),
+    dict(
+        label="Indirect",
+        method="update",
+        args=[{"visible": [False, True, False, False, False, False, False]}],
+    ),
+    dict(
+        label="OTA",
+        method="update",
+        args=[{"visible": [False, False, True, False, False, False, False]}],
+    ),
+    dict(
+        label="Other",
+        method="update",
+        args=[{"visible": [False, False, False, True, False, False, False]}],
+    ),
+    dict(
+        label="Total",
+        method="update",
+        args=[{"visible": [False, False, False, False, True, False, False]}],
+    ),
+    dict(
+        label="Pickup",
+        method="update",
+        args=[{"visible": [False, False, False, False, False, True, False]}],
+    ),
+    dict(
+        label="Booking Difference",
+        method="update",
+        args=[{"visible": [False, False, False, False, False, False, True]}],
+    )
+]
+
+fig.update_layout(
+    title=f'Bookings Analysis Segment - 2 , Report Date Range: {min_report_date.date()} - {max_report_date.date()}',
+    title_x=0.45,
+    updatemenus=[{
+        'type': 'dropdown',
+        'x': 1.1,
+        'y': 1.15,
+        'showactive': True,
+        'active': 0,
+        'buttons': buttons[:4]
+    },
+    {
+        'type': 'buttons',
+        'direction': 'right',
+        'x': 0.65,
+        'y': 1.15,
+        'showactive': True,
+        'active': 0,
+        'buttons': buttons[4:]
+    }
+    ]
+)
+fig.update_xaxes(title_text="Stay Date")
+fig.update_yaxes(title_text="Report Date")
+
+# Show figure
+st.plotly_chart(fig)
+
+
+trace_total = go.Heatmap(
+    z=plot_data.cumulative_total_type_bookings,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    zmin=zmin,
+    zmax=zmax,
+    colorbar=dict(title='Total Bookings'),
+)
+trace_pickup = go.Heatmap(
+    z=plot_data.total_rooms,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale,
+    colorbar=dict(title='Pickup Bookings'),
+    zmin=zmin,
+    zmax=zmax,
+    visible= False
+)
+trace_diff = go.Heatmap(
+    z=plot_data.booking_diff,
+    x=plot_data.stay_date,
+    y=plot_data.report_date,
+    colorscale=custom_colorscale_diff,
+    colorbar=dict(title='Booking Difference'),
+    visible= False
+)
+
+fig = go.Figure(data=[trace_total, trace_pickup, trace_diff])
+
+buttons = [
+    dict(
+        label="Total",
+        method="update",
+        args=[{"visible": [True, False, False]}],
+    ),
+    dict(
+        label="Pickup",
+        method="update",
+        args=[{"visible": [False, True, False]}],
+    ),
+    dict(
+        label="Booking Difference",
+        method="update",
+        args=[{"visible": [False, False, True]}],
+    )
+]
+fig.update_layout(
+    title=f'Bookings vs Pickup, Report Date Range: {min_report_date.date()} - {max_report_date.date()}',
+    title_x=0.45,
+    updatemenus=[{
+        'type': 'buttons',
+        'direction': 'right',
+        'x': 0.65,
+        'y': 1.15,
+        'showactive': True,
+        'active': 0,
+        'buttons': buttons
+    }]
+)
+fig.update_xaxes(title_text="Stay Date")
+fig.update_yaxes(title_text="Report Date")
+
+# Show figure
+st.plotly_chart(fig)
