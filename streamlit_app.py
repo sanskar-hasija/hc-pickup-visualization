@@ -39,7 +39,7 @@ max_bookings = st.slider(
         value = 10
     )
 min_bookings = st.slider(
-        'Select Max Bookings for Color Range',
+        'Select Min Bookings for Color Range',
         min_value=int(zmin),
         max_value= 5,
         value = -2
